@@ -1,0 +1,313 @@
+---
+kind: pipeline
+name: release
+
+platform:
+  os: linux
+  arch: amd64
+
+clone:
+  disable: true
+
+steps:
+  - name: clone
+    image: alpine/git
+    commands:
+      - git clone https://github.com/sighupio/permission-manager .
+      - git checkout $DRONE_COMMIT
+      - git fetch --tags
+
+  - name: unit-test
+    image: golang:1.16
+    pull: always
+    commands:
+      - apt-get update && apt-get install -y npm=7.5.2+ds-2
+      - npm install -g yarn@1.22.11
+      - make dependencies ui test
+    when:
+      event:
+        - push
+        - tag
+
+  - name: registry-sha
+    image: plugins/docker
+    settings:
+      username:
+        from_secret: quay_username
+      password:
+        from_secret: quay_password
+      registry: quay.io
+      repo: quay.io/sighup/permission-manager
+      tags:
+        - ${DRONE_COMMIT_SHA}
+    when:
+      event:
+        - push
+
+  - name: registry-tag
+    image: plugins/docker
+    settings:
+      username:
+        from_secret: quay_username
+      password:
+        from_secret: quay_password
+      registry: quay.io
+      repo: quay.io/sighup/permission-manager
+      tags:
+        - ${DRONE_TAG}
+    when:
+      event:
+        - tag
+
+  - name: release
+    image: golang
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+    commands:
+      - git checkout .
+      - git clean -f
+      - curl -sL https://git.io/goreleaser | bash
+    when:
+      event:
+        - tag
+
+---
+kind: pipeline
+name: e2e-kubernetes-1.20
+
+depends_on:
+  - release
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  ref:
+    include:
+      - refs/heads/master
+      - refs/tags/**
+      - refs/heads/dependabot/**
+      - refs/heads/renovate/**
+
+environment:
+  KIND_VERSION: v0.11.1
+  CLUSTER_VERSION: v1.20.7
+  CLUSTER_NAME: ${DRONE_REPO_NAME}-${DRONE_BUILD_NUMBER}-${DRONE_STAGE_NUMBER}
+  KUBECONFIG: /tmp/kubeconfig.yml
+
+steps:
+  - name: kind
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - wget -qO /usr/local/bin/kubectl "https://storage.googleapis.com/kubernetes-release/release/$${CLUSTER_VERSION}/bin/linux/amd64/kubectl"
+      - chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+      - kind create cluster --name $${CLUSTER_NAME} --image registry.sighup.io/fury/kindest/node:$${CLUSTER_VERSION} --config development/kind-config.yml
+      - kind get kubeconfig --name $${CLUSTER_NAME} > kubeconfig.yml
+
+      - apk add util-linux bash make git
+      - make KIND_CLUSTER_NAME=$${CLUSTER_NAME} build
+
+  - name: tests
+    image: quay.io/sighup/e2e-testing:1.1.0_0.2.2_2.16.1_1.9.4_1.22.0_3.8.7_2.4.1
+    pull: always
+    network_mode: host
+    commands:
+      - apt-get update && apt-get install -yqq gettext
+      - cp kubeconfig.yml $${KUBECONFIG}
+      - export CONTROL_PLANE_ADDRESS=$(kubectl config view --minify | grep server | cut -f 2- -d ":" | tr -d " ")
+      - bats -t tests/setup.sh
+      - bats -t tests/create-user.sh
+
+  - name: kind-destroy
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - chmod +x /usr/local/bin/kind
+      - kind delete cluster --name $${CLUSTER_NAME}
+    when:
+      status:
+        - success
+        - failure
+
+volumes:
+  - name: dockerconfig
+    host:
+      path: /root/.docker/config.json
+  - name: dockersock
+    host:
+      path: /var/run/docker.sock
+
+---
+kind: pipeline
+name: e2e-kubernetes-1.21
+
+depends_on:
+  - release
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  ref:
+    include:
+      - refs/heads/master
+      - refs/tags/**
+      - refs/heads/dependabot/**
+      - refs/heads/renovate/**
+
+environment:
+  KIND_VERSION: v0.11.1
+  CLUSTER_VERSION: v1.21.2
+  CLUSTER_NAME: ${DRONE_REPO_NAME}-${DRONE_BUILD_NUMBER}-${DRONE_STAGE_NUMBER}
+  KUBECONFIG: /tmp/kubeconfig.yml
+
+steps:
+  - name: kind
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - wget -qO /usr/local/bin/kubectl "https://storage.googleapis.com/kubernetes-release/release/$${CLUSTER_VERSION}/bin/linux/amd64/kubectl"
+      - chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+      - kind create cluster --name $${CLUSTER_NAME} --image registry.sighup.io/fury/kindest/node:$${CLUSTER_VERSION} --config development/kind-config.yml
+      - kind get kubeconfig --name $${CLUSTER_NAME} > kubeconfig.yml
+
+      - apk add util-linux bash make git
+      - make KIND_CLUSTER_NAME=$${CLUSTER_NAME} build
+
+  - name: tests
+    image: quay.io/sighup/e2e-testing:1.1.0_0.2.2_2.16.1_1.9.4_1.22.0_3.8.7_2.4.1
+    pull: always
+    network_mode: host
+    commands:
+      - apt-get update && apt-get install -yqq gettext
+      - cp kubeconfig.yml $${KUBECONFIG}
+      - export CONTROL_PLANE_ADDRESS=$(kubectl config view --minify | grep server | cut -f 2- -d ":" | tr -d " ")
+      - bats -t tests/setup.sh
+      - bats -t tests/create-user.sh
+
+  - name: kind-destroy
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - chmod +x /usr/local/bin/kind
+      - kind delete cluster --name $${CLUSTER_NAME}
+    when:
+      status:
+        - success
+        - failure
+
+volumes:
+  - name: dockerconfig
+    host:
+      path: /root/.docker/config.json
+  - name: dockersock
+    host:
+      path: /var/run/docker.sock
+
+---
+kind: pipeline
+name: e2e-kubernetes-1.22
+
+depends_on:
+  - release
+
+platform:
+  os: linux
+  arch: amd64
+
+trigger:
+  ref:
+    include:
+      - refs/heads/master
+      - refs/tags/**
+      - refs/heads/dependabot/**
+      - refs/heads/renovate/**
+
+environment:
+  KIND_VERSION: v0.11.1
+  CLUSTER_VERSION: v1.22.0
+  CLUSTER_NAME: ${DRONE_REPO_NAME}-${DRONE_BUILD_NUMBER}-${DRONE_STAGE_NUMBER}
+  KUBECONFIG: /tmp/kubeconfig.yml
+
+steps:
+  - name: kind
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - wget -qO /usr/local/bin/kubectl "https://storage.googleapis.com/kubernetes-release/release/$${CLUSTER_VERSION}/bin/linux/amd64/kubectl"
+      - chmod +x /usr/local/bin/kind /usr/local/bin/kubectl
+      - kind create cluster --name $${CLUSTER_NAME} --image registry.sighup.io/fury/kindest/node:$${CLUSTER_VERSION} --config development/kind-config.yml
+      - kind get kubeconfig --name $${CLUSTER_NAME} > kubeconfig.yml
+
+      - apk add util-linux bash make git
+      - make KIND_CLUSTER_NAME=$${CLUSTER_NAME} build
+
+  - name: tests
+    image: quay.io/sighup/e2e-testing:1.1.0_0.2.2_2.16.1_1.9.4_1.22.0_3.8.7_2.4.1
+    pull: always
+    network_mode: host
+    commands:
+      - apt-get update && apt-get install -yqq gettext
+      - cp kubeconfig.yml $${KUBECONFIG}
+      - export CONTROL_PLANE_ADDRESS=$(kubectl config view --minify | grep server | cut -f 2- -d ":" | tr -d " ")
+      - bats -t tests/setup.sh
+      - bats -t tests/create-user.sh
+
+  - name: kind-destroy
+    image: docker:dind
+    pull: always
+    volumes:
+      - name: dockerconfig
+        path: /root/.docker/config.json
+      - name: dockersock
+        path: /var/run/docker.sock
+    commands:
+      - wget -qO /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/$${KIND_VERSION}/kind-$(uname)-amd64"
+      - chmod +x /usr/local/bin/kind
+      - kind delete cluster --name $${CLUSTER_NAME}
+    when:
+      status:
+        - success
+        - failure
+
+volumes:
+  - name: dockerconfig
+    host:
+      path: /root/.docker/config.json
+  - name: dockersock
+    host:
+      path: /var/run/docker.sock

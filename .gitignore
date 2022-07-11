@@ -1,0 +1,13 @@
+permission-manager
+e2e-test/data/kubeconfigs
+node_modules
+e2e-test/package-lock.json
+dist
+test.*
+.DS_Store
+chore.sh
+.kubeconfig
+.kubeconfig-backend
+tmp
+.kubeconfig-backend.bak
+.envrc
